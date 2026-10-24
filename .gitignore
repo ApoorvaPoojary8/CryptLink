@@ -1,0 +1,13 @@
+# Node.js
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+backend/venv/
+backend/.venv/
+
+# Environment variables
+.env
