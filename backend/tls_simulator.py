@@ -11,6 +11,10 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
 class TLSHandshakeSimulator:
+    # Reuse DH parameters across simulator instances.
+    # Fresh ephemeral key pairs are generated for every handshake.
+    _dh_parameters = None
+
     def __init__(self):
         self.events = []
         self.status = "NOT_STARTED"
@@ -21,6 +25,13 @@ class TLSHandshakeSimulator:
             "name": name,
             "details": details
         })
+
+    def get_result(self):
+        return {
+            "status": self.status,
+            "total_steps": len(self.events),
+            "events": self.events
+        }
 
     def run(self):
         self.events = []
@@ -38,26 +49,36 @@ class TLSHandshakeSimulator:
             })
 
             # Step 2: ServerHello and ephemeral DH keys
-            parameters = dh.generate_parameters(
-                generator=2,
-                key_size=2048
-            )
+            # Generate DH parameters only once per process.
+            if TLSHandshakeSimulator._dh_parameters is None:
+                TLSHandshakeSimulator._dh_parameters = (
+                    dh.generate_parameters(
+                        generator=2,
+                        key_size=2048
+                    )
+                )
 
+            parameters = TLSHandshakeSimulator._dh_parameters
+
+            # Generate fresh ephemeral key pairs for this handshake.
             client_private = parameters.generate_private_key()
             server_private = parameters.generate_private_key()
 
             client_public = client_private.public_key()
             server_public = server_private.public_key()
 
+            server_random = os.urandom(32)
+
             self.add_event("ServerHello", {
-                "server_random": os.urandom(32).hex(),
+                "protocol_version": "TLS 1.3 (simulated)",
+                "server_random": server_random.hex(),
                 "selected_key_exchange": "Diffie-Hellman",
                 "server_public_key": str(
                     server_public.public_numbers().y
                 )
             })
 
-            # Step 3: Self-signed server certificate
+            # Step 3: Generate a self-signed server certificate
             certificate_key = rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=2048
@@ -87,9 +108,13 @@ class TLSHandshakeSimulator:
                     ),
                     critical=True
                 )
-                .sign(certificate_key, hashes.SHA256())
+                .sign(
+                    certificate_key,
+                    hashes.SHA256()
+                )
             )
 
+            # Verify the certificate's self-signature.
             certificate.public_key().verify(
                 certificate.signature,
                 certificate.tbs_certificate_bytes,
@@ -97,14 +122,20 @@ class TLSHandshakeSimulator:
                 certificate.signature_hash_algorithm
             )
 
+            certificate_pem = certificate.public_bytes(
+                serialization.Encoding.PEM
+            ).decode("utf-8")
+
             self.add_event("ServerCertificate", {
                 "subject": certificate.subject.rfc4514_string(),
                 "issuer": certificate.issuer.rfc4514_string(),
                 "self_signature_valid": True,
                 "trusted": False,
-                "certificate_pem": certificate.public_bytes(
-                    serialization.Encoding.PEM
-                ).decode()
+                "trust_note": (
+                    "Self-signed certificate; "
+                    "identity is not automatically trusted."
+                ),
+                "certificate_pem": certificate_pem
             })
 
             # Step 4: Diffie-Hellman shared secret
@@ -125,7 +156,7 @@ class TLSHandshakeSimulator:
                 ).hexdigest()[:16]
             })
 
-            # Step 5: Derive session keys with HKDF
+            # Step 5: Derive session keys using HKDF-SHA256
             def derive_key(secret):
                 return HKDF(
                     algorithm=hashes.SHA256(),
@@ -140,22 +171,19 @@ class TLSHandshakeSimulator:
             if client_key != server_key:
                 raise ValueError("Session keys do not match")
 
+            session_key_fingerprint = hashlib.sha256(
+                client_key
+            ).hexdigest()[:16]
+
             self.add_event("HandshakeComplete", {
                 "session_keys_match": True,
                 "session_key_bits": 256,
-                "session_key_fingerprint": hashlib.sha256(
-                    client_key
-                ).hexdigest()[:16],
+                "session_key_fingerprint": session_key_fingerprint,
                 "status": "SUCCESS"
             })
 
             self.status = "SUCCESS"
-
-            return {
-                "status": self.status,
-                "total_steps": len(self.events),
-                "events": self.events
-            }
+            return self.get_result()
 
         except Exception:
             self.status = "FAILED"
