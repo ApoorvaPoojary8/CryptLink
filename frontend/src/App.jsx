@@ -1,11 +1,9 @@
-
 import { useState } from "react";
 import {
   ShieldCheck,
   LockKeyhole,
   Server,
   Monitor,
-  ArrowDown,
   Play,
   RotateCcw,
   CheckCircle2,
@@ -15,6 +13,7 @@ import {
   KeyRound,
   FileBadge,
   Activity,
+  ShieldAlert,
 } from "lucide-react";
 import "./App.css";
 
@@ -37,6 +36,11 @@ const handshakeSteps = [
     icon: FileBadge,
   },
   {
+    name: "CertificateVerify",
+    description: "Server proves possession of its certificate private key",
+    icon: ShieldCheck,
+  },
+  {
     name: "KeyExchange",
     description: "Client and server derive a shared secret",
     icon: KeyRound,
@@ -45,6 +49,11 @@ const handshakeSteps = [
     name: "HandshakeComplete",
     description: "Session keys are successfully derived",
     icon: ShieldCheck,
+  },
+  {
+    name: "HandshakeFailed",
+    description: "The handshake stopped after a security check failed",
+    icon: ShieldAlert,
   },
 ];
 
@@ -55,7 +64,7 @@ function App() {
   const [error, setError] = useState("");
   const [selectedStep, setSelectedStep] = useState(null);
 
-  const startHandshake = async () => {
+  const runHandshake = async (simulateAttack = false) => {
     setLoading(true);
     setError("");
     setEvents([]);
@@ -65,18 +74,30 @@ function App() {
     try {
       const response = await fetch(`${API}/handshake/start`, {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        ...(simulateAttack
+          ? {
+              body: JSON.stringify({
+                simulate_failure: "tampered_signature",
+              }),
+            }
+          : {}),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.message || "Handshake failed");
+        throw new Error(data.message || "Handshake request failed");
       }
 
-      setEvents(data.events || []);
-      setStatus(data.status);
-      if (data.events?.length) {
-        setSelectedStep(data.events.length - 1);
+      const receivedEvents = data.events || [];
+      setEvents(receivedEvents);
+      setStatus(data.status || "FAILED");
+
+      if (receivedEvents.length > 0) {
+        setSelectedStep(receivedEvents.length - 1);
       }
     } catch (err) {
       setStatus("FAILED");
@@ -88,6 +109,9 @@ function App() {
     }
   };
 
+  const startHandshake = () => runHandshake(false);
+  const simulateAttack = () => runHandshake(true);
+
   const resetHandshake = async () => {
     setLoading(true);
     setError("");
@@ -97,15 +121,19 @@ function App() {
         method: "POST",
       });
 
+      const data = await response.json().catch(() => ({}));
+
       if (!response.ok) {
-        throw new Error("Could not reset handshake");
+        throw new Error(data.message || "Could not reset handshake");
       }
 
       setEvents([]);
       setStatus("NOT_STARTED");
       setSelectedStep(null);
     } catch (err) {
-      setError(err.message);
+      setError(
+        `${err.message}. Check that the Flask backend is running on port 5000.`
+      );
     } finally {
       setLoading(false);
     }
@@ -122,7 +150,7 @@ function App() {
     IN_PROGRESS: "Handshake in progress",
     SUCCESS: "Secure session simulated",
     FAILED: "Handshake failed",
-  }[status];
+  }[status] || status;
 
   return (
     <div className="app-shell">
@@ -216,7 +244,7 @@ function App() {
                 <h3>Handshake sequence</h3>
               </div>
               <span className="step-counter">
-                {events.length} / {handshakeSteps.length}
+                {events.length} events
               </span>
             </div>
 
@@ -248,12 +276,12 @@ function App() {
 
             <div className="timeline">
               {handshakeSteps.map((step, index) => {
-                const event = events.find(
+                const eventIndex = events.findIndex(
                   (item) => item.name === step.name
                 );
+                const event = eventIndex >= 0 ? events[eventIndex] : null;
                 const Icon = step.icon;
-                const isActive = selectedStep ===
-                  events.findIndex((item) => item.name === step.name);
+                const isActive = selectedStep === eventIndex;
 
                 return (
                   <div className="timeline-item" key={step.name}>
@@ -263,11 +291,7 @@ function App() {
                           event ? "completed" : ""
                         } ${isActive ? "selected" : ""}`}
                       >
-                        {event ? (
-                          <CheckCircle2 size={19} />
-                        ) : (
-                          index + 1
-                        )}
+                        {event ? <CheckCircle2 size={19} /> : index + 1}
                       </span>
                       {index < handshakeSteps.length - 1 && (
                         <span
@@ -279,17 +303,12 @@ function App() {
                     </div>
 
                     <button
+                      type="button"
                       className={`timeline-content ${
                         isActive ? "selected" : ""
                       } ${event ? "available" : ""}`}
                       disabled={!event || loading}
-                      onClick={() =>
-                        setSelectedStep(
-                          events.findIndex(
-                            (item) => item.name === step.name
-                          )
-                        )
-                      }
+                      onClick={() => setSelectedStep(eventIndex)}
                     >
                       <div className="timeline-icon">
                         <Icon size={19} />
@@ -309,6 +328,7 @@ function App() {
 
             <div className="action-row">
               <button
+                type="button"
                 className="primary-button"
                 onClick={startHandshake}
                 disabled={loading}
@@ -318,10 +338,21 @@ function App() {
                 ) : (
                   <Play size={18} />
                 )}
-                {loading ? "Running handshake..." : "Start handshake"}
+                {loading ? "Running..." : "Start handshake"}
               </button>
 
               <button
+                type="button"
+                className="secondary-button"
+                onClick={simulateAttack}
+                disabled={loading}
+              >
+                <ShieldAlert size={17} />
+                Simulate signature attack
+              </button>
+
+              <button
+                type="button"
                 className="secondary-button"
                 onClick={resetHandshake}
                 disabled={loading}
@@ -332,7 +363,7 @@ function App() {
             </div>
 
             {error && (
-              <div className="error-banner">
+              <div className="error-banner" role="alert">
                 <AlertCircle size={18} />
                 {error}
               </div>
@@ -375,8 +406,23 @@ function App() {
                 {activeEvent.name === "ServerCertificate" && (
                   <div className="certificate-warning">
                     <AlertCircle size={17} />
-                    Self-signature validity does not establish
-                    certificate trust or authenticate the key exchange.
+                    Self-signature validity does not establish certificate
+                    trust or authenticate the key exchange.
+                  </div>
+                )}
+
+                {activeEvent.name === "CertificateVerify" &&
+                  activeEvent.details?.signature_valid === false && (
+                    <div className="error-banner" role="alert">
+                      <ShieldAlert size={18} />
+                      Signature verification failed. The handshake was stopped.
+                    </div>
+                  )}
+
+                {activeEvent.name === "HandshakeFailed" && (
+                  <div className="error-banner" role="alert">
+                    <ShieldAlert size={18} />
+                    The handshake failed because a security check did not pass.
                   </div>
                 )}
 

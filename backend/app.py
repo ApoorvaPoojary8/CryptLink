@@ -1,8 +1,9 @@
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify , request
 from flask_cors import CORS
 
 from tls_simulator import TLSHandshakeSimulator
+
 
 app = Flask(__name__)
 
@@ -38,18 +39,27 @@ def health():
 
 @app.route("/api/handshake/start", methods=["POST"])
 def start_handshake():
+    data = request.get_json(silent=True) or {}
+    simulate_failure = data.get("simulate_failure")
+
+    if simulate_failure not in (None, "tampered_signature"):
+        return jsonify({
+            "status": "INVALID_REQUEST",
+            "message": "Unsupported failure simulation"
+        }), 400
+
     try:
-        result = simulator.run()
+        result = simulator.run(
+            simulate_failure=simulate_failure
+        )
         return jsonify(result), 200
 
     except Exception:
         app.logger.exception("Handshake simulation failed")
-
         return jsonify({
             "status": "FAILED",
-            "message": "Handshake simulation failed. Check backend logs."
+            "message": "Unexpected simulation error"
         }), 500
-
 
 @app.route("/api/handshake/status", methods=["GET"])
 def handshake_status():
