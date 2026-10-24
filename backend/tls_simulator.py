@@ -4,17 +4,18 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import dh, rsa, padding
+from cryptography.hazmat.primitives.asymmetric import (
+    x25519,
+    rsa,
+    padding,
+)
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
 class TLSHandshakeSimulator:
-    # Reuse DH parameters across simulator instances.
-    # Fresh ephemeral key pairs are generated for every handshake.
-    _dh_parameters = None
-
     def __init__(self):
         self.events = []
         self.status = "NOT_STARTED"
@@ -23,17 +24,17 @@ class TLSHandshakeSimulator:
         self.events.append({
             "step": len(self.events) + 1,
             "name": name,
-            "details": details
+            "details": details,
         })
 
     def get_result(self):
         return {
             "status": self.status,
             "total_steps": len(self.events),
-            "events": self.events
+            "events": self.events,
         }
 
-    def run(self):
+    def run(self, simulate_failure=None):
         self.events = []
         self.status = "IN_PROGRESS"
 
@@ -44,50 +45,41 @@ class TLSHandshakeSimulator:
             self.add_event("ClientHello", {
                 "protocol_version": "TLS 1.3 (simulated)",
                 "client_random": client_random.hex(),
-                "supported_key_exchange": "Diffie-Hellman",
-                "supported_cipher_suite": "AES-256-GCM (illustrative)"
+                "supported_key_exchange": "X25519",
+                "supported_cipher_suite": "AES-256-GCM (illustrative)",
             })
 
-            # Step 2: ServerHello and ephemeral DH keys
-            # Generate DH parameters only once per process.
-            if TLSHandshakeSimulator._dh_parameters is None:
-                TLSHandshakeSimulator._dh_parameters = (
-                    dh.generate_parameters(
-                        generator=2,
-                        key_size=2048
-                    )
-                )
-
-            parameters = TLSHandshakeSimulator._dh_parameters
-
-            # Generate fresh ephemeral key pairs for this handshake.
-            client_private = parameters.generate_private_key()
-            server_private = parameters.generate_private_key()
+            # Step 2: ServerHello and ephemeral X25519 keys
+            client_private = x25519.X25519PrivateKey.generate()
+            server_private = x25519.X25519PrivateKey.generate()
 
             client_public = client_private.public_key()
             server_public = server_private.public_key()
 
             server_random = os.urandom(32)
 
+            server_public_bytes = server_public.public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+
             self.add_event("ServerHello", {
                 "protocol_version": "TLS 1.3 (simulated)",
                 "server_random": server_random.hex(),
-                "selected_key_exchange": "Diffie-Hellman",
-                "server_public_key": str(
-                    server_public.public_numbers().y
-                )
+                "selected_key_exchange": "X25519",
+                "server_public_key": server_public_bytes.hex(),
             })
 
-            # Step 3: Generate a self-signed server certificate
+            # Step 3: Generate a temporary self-signed RSA certificate
             certificate_key = rsa.generate_private_key(
                 public_exponent=65537,
-                key_size=2048
+                key_size=2048,
             )
 
             subject = x509.Name([
                 x509.NameAttribute(
                     NameOID.COMMON_NAME,
-                    "localhost"
+                    "localhost",
                 )
             ])
 
@@ -104,22 +96,19 @@ class TLSHandshakeSimulator:
                 .add_extension(
                     x509.BasicConstraints(
                         ca=False,
-                        path_length=None
+                        path_length=None,
                     ),
-                    critical=True
+                    critical=True,
                 )
-                .sign(
-                    certificate_key,
-                    hashes.SHA256()
-                )
+                .sign(certificate_key, hashes.SHA256())
             )
 
-            # Verify the certificate's self-signature.
+            # Verify the self-signed certificate signature.
             certificate.public_key().verify(
                 certificate.signature,
                 certificate.tbs_certificate_bytes,
                 padding.PKCS1v15(),
-                certificate.signature_hash_algorithm
+                certificate.signature_hash_algorithm,
             )
 
             certificate_pem = certificate.public_bytes(
@@ -132,13 +121,72 @@ class TLSHandshakeSimulator:
                 "self_signature_valid": True,
                 "trusted": False,
                 "trust_note": (
-                    "Self-signed certificate; "
-                    "identity is not automatically trusted."
+                    "Self-signed certificate; the client's "
+                    "trust in the server identity is not established."
                 ),
-                "certificate_pem": certificate_pem
+                "certificate_pem": certificate_pem,
             })
 
-            # Step 4: Diffie-Hellman shared secret
+            # Step 4: CertificateVerify
+            # Sign handshake data using the certificate private key.
+            transcript = (
+                client_random
+                + server_random
+                + server_public_bytes
+            )
+
+            signature = certificate_key.sign(
+                transcript,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+
+            # Optional negative test: tamper with the signature.
+            if simulate_failure == "tampered_signature":
+                signature = (
+                    bytes([signature[0] ^ 1])
+                    + signature[1:]
+                )
+
+            try:
+                certificate.public_key().verify(
+                    signature,
+                    transcript,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    hashes.SHA256(),
+                )
+
+            except InvalidSignature:
+                self.add_event("CertificateVerify", {
+                    "algorithm": "RSA-PSS with SHA-256",
+                    "signature_valid": False,
+                    "status": "FAILED",
+                })
+
+                self.status = "FAILED"
+
+                self.add_event("HandshakeFailed", {
+                    "reason": (
+                        "CertificateVerify signature validation failed"
+                    ),
+                    "security_event": "Signature tampering detected",
+                })
+
+                return self.get_result()
+
+            self.add_event("CertificateVerify", {
+                "algorithm": "RSA-PSS with SHA-256",
+                "signature_valid": True,
+                "status": "SUCCESS",
+            })
+
+            # Step 5: X25519 shared-secret derivation
             client_secret = client_private.exchange(server_public)
             server_secret = server_private.exchange(client_public)
 
@@ -146,23 +194,23 @@ class TLSHandshakeSimulator:
                 raise ValueError("Shared secrets do not match")
 
             self.add_event("KeyExchange", {
-                "algorithm": "Diffie-Hellman",
+                "algorithm": "X25519",
                 "shared_secrets_match": True,
                 "client_fingerprint": hashlib.sha256(
                     client_secret
                 ).hexdigest()[:16],
                 "server_fingerprint": hashlib.sha256(
                     server_secret
-                ).hexdigest()[:16]
+                ).hexdigest()[:16],
             })
 
-            # Step 5: Derive session keys using HKDF-SHA256
+            # Step 6: Derive session keys using HKDF-SHA256
             def derive_key(secret):
                 return HKDF(
                     algorithm=hashes.SHA256(),
                     length=32,
                     salt=None,
-                    info=b"CryptLink session key"
+                    info=b"CryptLink session key",
                 ).derive(secret)
 
             client_key = derive_key(client_secret)
@@ -171,15 +219,13 @@ class TLSHandshakeSimulator:
             if client_key != server_key:
                 raise ValueError("Session keys do not match")
 
-            session_key_fingerprint = hashlib.sha256(
-                client_key
-            ).hexdigest()[:16]
-
             self.add_event("HandshakeComplete", {
                 "session_keys_match": True,
                 "session_key_bits": 256,
-                "session_key_fingerprint": session_key_fingerprint,
-                "status": "SUCCESS"
+                "session_key_fingerprint": hashlib.sha256(
+                    client_key
+                ).hexdigest()[:16],
+                "status": "SUCCESS",
             })
 
             self.status = "SUCCESS"
