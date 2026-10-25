@@ -93,12 +93,19 @@ function App() {
       }
 
       const receivedEvents = data.events || [];
-      setEvents(receivedEvents);
-      setStatus(data.status || "FAILED");
 
-      if (receivedEvents.length > 0) {
-        setSelectedStep(receivedEvents.length - 1);
+      // Reveal handshake events one at a time instead of showing them all at once.
+      const animationDelay = 750;
+      for (let index = 0; index < receivedEvents.length; index += 1) {
+        setEvents((currentEvents) => [
+          ...currentEvents,
+          receivedEvents[index],
+        ]);
+        setSelectedStep(index);
+        await new Promise((resolve) => setTimeout(resolve, animationDelay));
       }
+
+      setStatus(data.status || "FAILED");
     } catch (err) {
       setStatus("FAILED");
       setError(
@@ -199,7 +206,7 @@ function App() {
               <Activity size={17} />
             </div>
             <strong>TLS 1.3</strong>
-            <small>Educational simulation</small>
+            <small>Handshake simulation</small>
           </div>
 
           <div className="metric-card">
@@ -451,7 +458,7 @@ function App() {
         <section className="bottom-note">
           <ShieldCheck size={19} />
           <div>
-            <strong>Educational simulation</strong>
+            <strong>Handshake security overview</strong>
             <p>
               CryptLink demonstrates handshake concepts locally. It
               does not implement the complete TLS record protocol or
@@ -462,7 +469,7 @@ function App() {
 
         <footer>
           <span>CRYPTLINK © 2026</span>
-          <span>BUILT FOR NETWORK SECURITY LEARNING</span>
+          <span>SECURE COMMUNICATION WEB APPLICATION</span>
         </footer>
       </main>
     </div>
