@@ -323,16 +323,20 @@ pip install -r requirements.txt
 - The application does not implement the complete TLS record protocol or a production-ready authenticated TLS connection.
 - Session-key fingerprints are shortened hashes for demonstration. Actual session keys should not be displayed or logged.
 
-## 13. Future Enhancements
 
-- Automated tests for successful and failed handshakes.
-- Improved API validation and error handling.
-- Animated handshake visualization.
-- Additional certificate-validation scenarios.
-- Improved security-event reporting.
-- Application screenshots and demonstration video.
+## Screenshots
 
-## 14. Project Information
+### CryptLink Dashboard
+![CryptLink Dashboard](screenshots/dashboard.png)
+
+### Successful TLS-Style Handshake
+![Successful Handshake](screenshots/handshake-success.png)
+
+### Signature Tampering Detection
+![Signature Attack Detection](screenshots/signature-attack.png)
+
+
+## 13. Project Information
 
 **Project Name:** CryptLink — Secure Communication Web Application
 
